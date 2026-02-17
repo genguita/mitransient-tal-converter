@@ -63,9 +63,12 @@ def get_sensor_laser_intersections(scene, scan_size, laser_scan_size, force_equa
     # Transform point positions and normals to tal compatible format
     sensor_grid_xyz = dr.reshape(mi.TensorXf, si_sensor.p, (scan_size[0], scan_size[1], 3)).numpy()
     sensor_grid_normals = dr.reshape(mi.TensorXf, si_sensor.n, (scan_size[0], scan_size[1], 3)).numpy()
+    sensor_valid_mask = dr.reshape(mi.TensorXb, si_sensor.is_valid(), (scan_size[0], scan_size[1])).numpy()
     laser_grid_xyz = dr.reshape(mi.TensorXf, si_laser.p, (laser_scan_size[0], laser_scan_size[1], 3)).numpy()
     laser_grid_normals = dr.reshape(mi.TensorXf, si_laser.n, (laser_scan_size[0], laser_scan_size[1], 3)).numpy()
-    return sensor_grid_xyz, sensor_grid_normals, laser_grid_xyz, laser_grid_normals
+    laser_valid_mask = dr.reshape(mi.TensorXb, si_laser.is_valid(), (laser_scan_size[0], laser_scan_size[1])).numpy()
+
+    return sensor_grid_xyz, sensor_grid_normals, sensor_valid_mask, laser_grid_xyz, laser_grid_normals, laser_valid_mask
 
 
 def main(args):
@@ -118,7 +121,7 @@ def main(args):
     tal_dict['laser_grid_format'] = 2
 
     # Sensor and laser positions and point grids
-    sensor_grid_xyz, sensor_grid_normals, laser_grid_xyz, laser_grid_normals = (
+    sensor_grid_xyz, sensor_grid_normals, sensor_grid_valid, laser_grid_xyz, laser_grid_normals, laser_grid_valid = (
         get_sensor_laser_intersections(scene, scan_size, laser_scan_size, force_equal_scan, is_single))
 
     tal_dict['sensor_xyz'] = sensor.m_to_world.translation().numpy().flatten()
@@ -146,6 +149,13 @@ def main(args):
         if is_exhaustive:
             # Swap sensor scan and laser illumination dimensions
             transient_data = transient_data.swapaxes(1, 3).swapaxes(2, 4)
+
+            # Zero-out invalid laser and sensor scans (laser or sensor ray does not intersect the scene)
+            transient_data[:, ~laser_grid_valid, :, :] = 0.0
+            transient_data[:, :, :, ~sensor_grid_valid] = 0.0
+        else:
+            # Zero-out invalid sensor scans (sensor ray does not intersect the scene)
+            transient_data[:,  ~sensor_grid_valid] = 0.0
 
     tal_dict['H'] = transient_data
 
