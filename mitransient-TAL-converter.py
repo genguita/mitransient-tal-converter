@@ -1,8 +1,58 @@
 import sys
-import os
+import time
 import argparse
-import h5py
 import numpy as np
+import h5py
+
+
+def get_sensor_laser_intersections(scene, scan_size, laser_scan_size, force_equal_grids):
+    import mitsuba as mi
+    import drjit as dr
+
+    # Get sensor and emitter
+    sensor = scene.sensors()[0]
+    emitter = scene.emitters()[0]
+
+    # Sample rays from the sensor
+    scan_x, scan_y = dr.meshgrid(
+        dr.linspace(mi.Float, 0.0, 1.0, scan_size[0], endpoint=False),
+        dr.linspace(mi.Float, 0.0, 1.0, scan_size[1], endpoint=False))
+    points: mi.Point2f = mi.Point2f(scan_x, scan_y)
+    sensor_rays, _ = sensor.sample_ray(mi.Float(0.0), mi.Float(0.0), points, mi.Point2f(0.0), mi.Bool(True))
+
+    # Intersect with the scene to obtain the scanned points
+    si_sensor = scene.ray_intersect(sensor_rays, ray_flags=mi.RayFlags.All, coherent=mi.Bool(True))
+
+    si_laser = None
+    if force_equal_grids:
+        # If scanning is equal, scanned and illuminated points are the same
+        si_laser = si_sensor
+    else:
+        # Else, sample rays from the emitter to obtain illuminated points
+        # Dummy emitter, with custom FOV
+        dummy_emitter = mi.load_dict({
+            "type": "projector",
+            "fov": scene.integrator().illumination_scan_fov,
+            "to_world": mi.ScalarTransform4f(emitter.world_transform().matrix.to_numpy()[..., 0]),
+        })
+
+        # Generate a ray for each of the illuminated points
+        laser_x, laser_y = dr.meshgrid(
+            dr.linspace(mi.Float, 0.0, 1.0, laser_scan_size[0], endpoint=False),
+            dr.linspace(mi.Float, 0.0, 1.0, laser_scan_size[1], endpoint=False),
+        )
+        points: mi.Point2f = mi.Point2f(laser_x, laser_y)
+        laser_rays, _ = dummy_emitter. sample_ray(mi.Float(0.0), mi.Float(0.0), mi.Point2f(0.0), points, mi.Bool(True))
+
+        # Intersect with the scene to obtain the illuminated points
+        si_laser = scene.ray_intersect(laser_rays, ray_flags=mi.RayFlags.All, coherent=mi.Bool(True))
+
+    # Transform point positions and normals to TAL compatible format
+    sensor_grid_xyz = dr.reshape(mi.TensorXf, si_sensor.p, (scan_size[0], scan_size[1], 3)).numpy()
+    sensor_grid_normals = dr.reshape(mi.TensorXf, si_sensor.n, (scan_size[0], scan_size[1], 3)).numpy()
+    laser_grid_xyz = dr.reshape(mi.TensorXf, si_laser.p, (laser_scan_size[0], laser_scan_size[1], 3)).numpy()
+    laser_grid_normals = dr.reshape(mi.TensorXf, si_laser.n, (laser_scan_size[0], laser_scan_size[1], 3)).numpy()
+    return sensor_grid_xyz, sensor_grid_normals, laser_grid_xyz, laser_grid_normals
 
 
 def main(args):
@@ -10,6 +60,12 @@ def main(args):
     import drjit as dr
     mi.set_variant(args.variant)
     import mitransient as mitr
+
+    is_polarized = 'polarized' in args.variant
+    if is_polarized:
+        print("NOTE: TAL does not implement any reconstruction algorithms that take polarization into account. "
+              "If you want to use the output file for reconstruction, you must discard everything but the "
+              "intensity component of the Stokes vector.")
 
     scene = mi.load_file(args.scene_file)
     integrator = scene.integrator()
@@ -29,9 +85,13 @@ def main(args):
 
     # Data format parameters
     scan_size = film.size().numpy()
+    laser_scan_size = scan_size
+    if not integrator.force_equal_grids:
+        laser_scan_size = (film.laser_scan_width if film.laser_scan_width > 1 else 1,
+                           film.laser_scan_height if film.laser_scan_height > 1 else 1)
     is_exhaustive = integrator.capture_type == 3
     if is_exhaustive:
-        H_shape = (T, film.laser_scan_width, film.laser_scan_height, scan_size[0], scan_size[1])
+        H_shape = (T, laser_scan_size[0], laser_scan_size[1], scan_size[0], scan_size[1])
     else:
         H_shape = (T, scan_size[0], scan_size[1])
 
@@ -40,18 +100,34 @@ def main(args):
     TAL_dict['laser_grid_format'] = 2
 
     # Sensor and laser positions and point grids
-    # TODO: get laser and sensor, intersect with the scene to obtain these values
-    TAL_dict['sensor_xyz'] = sensor.m_to_world.translation().numpy().flatten()
-    TAL_dict['sensor_grid_xyz'] = 0
-    TAL_dict['sensor_grid_normals'] = 0
-    TAL_dict['laser_xyz'] = mi.traverse(emitter)['to_world'].translation().numpy().flatten()
-    TAL_dict['laser_grid_xyz'] = 0
-    TAL_dict['laser_grid_normals'] = 0
+    sensor_grid_xyz, sensor_grid_normals, laser_grid_xyz, laser_grid_normals = (
+        get_sensor_laser_intersections(scene, scan_size, laser_scan_size, integrator.force_equal_grids))
 
+    TAL_dict['sensor_xyz'] = sensor.m_to_world.translation().numpy().flatten()
+    TAL_dict['sensor_grid_xyz'] = sensor_grid_xyz
+    TAL_dict['sensor_grid_normals'] = sensor_grid_normals
+    TAL_dict['laser_xyz'] = mi.traverse(emitter)['to_world'].translation().numpy().flatten()
+    TAL_dict['laser_grid_xyz'] = laser_grid_xyz
+    TAL_dict['laser_grid_normals'] = laser_grid_normals
+
+    # Render the NLOS scene
     transient_data = np.zeros(H_shape)
     if not args.dryrun:
-        _, transient_data = mi.render(scene)
-        # TODO: reshape into TAL's format
+        dr.print("Rendering the NLOS scene...")
+        start = time.time()
+        _, transient_data = mi.render(scene, spp=100)
+        transient_data = np.array(transient_data)
+        dr.print(f"Rendering done, took {time.time() - start:.3f} seconds")
+
+        # Reshape to match TAL's H format
+        transient_data = np.moveaxis(transient_data, -2, 0) # Time dimension should be first
+        if not is_polarized:
+            # If simulated than one channel (RGB), sum them, except for polarized variants
+            transient_data = np.sum(transient_data, axis=-1)
+
+        if is_exhaustive:
+            # Swap sensor scan and laser illumination dimensions
+            transient_data = transient_data.swapaxes(1, 3).swapaxes(2, 4)
 
     TAL_dict['H'] = transient_data
 
