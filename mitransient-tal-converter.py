@@ -6,6 +6,10 @@ import h5py
 
 
 def get_sensor_laser_intersections(scene, scan_size, laser_scan_size, force_equal_grids, is_single_capture):
+    """
+        Computes sensor and laser intersections with the scene to fill the sensor/laser_grid position and normals
+        required for tal
+    """
     import mitsuba as mi
     import drjit as dr
 
@@ -56,7 +60,7 @@ def get_sensor_laser_intersections(scene, scan_size, laser_scan_size, force_equa
         # If scanning is equal, scanned and illuminated points are the same
         si_laser = si_sensor
 
-    # Transform point positions and normals to TAL compatible format
+    # Transform point positions and normals to tal compatible format
     sensor_grid_xyz = dr.reshape(mi.TensorXf, si_sensor.p, (scan_size[0], scan_size[1], 3)).numpy()
     sensor_grid_normals = dr.reshape(mi.TensorXf, si_sensor.n, (scan_size[0], scan_size[1], 3)).numpy()
     laser_grid_xyz = dr.reshape(mi.TensorXf, si_laser.p, (laser_scan_size[0], laser_scan_size[1], 3)).numpy()
@@ -72,25 +76,25 @@ def main(args):
 
     is_polarized = 'polarized' in args.variant
     if is_polarized:
-        print("NOTE: TAL does not implement any reconstruction algorithms that take polarization into account. "
+        print("NOTE: tal does not implement any reconstruction algorithms that take polarization into account. "
               "If you want to use the output file for reconstruction, you must discard everything but the "
               "intensity component of the Stokes vector.")
 
+    # Load the scene
     scene = mi.load_file(args.scene_file)
     integrator = scene.integrator()
     sensor = scene.sensors()[0]
     film = sensor.film()
     emitter = scene.emitters()[0]
-    scene_params = mi.traverse(scene)
 
-    # Fill TAL capture data info
-    TAL_dict = dict()
+    # Fill tal capture data info
+    tal_dict = dict()
 
     # Transient sequence parameters
     T = film.temporal_bins
-    TAL_dict['t_start'] = film.start_opl
-    TAL_dict['delta_t'] = film.bin_width_opl
-    TAL_dict['t_account_first_and_last_bounces'] = integrator.account_first_and_last_bounces
+    tal_dict['t_start'] = film.start_opl
+    tal_dict['delta_t'] = film.bin_width_opl
+    tal_dict['t_account_first_and_last_bounces'] = integrator.account_first_and_last_bounces
 
     # Data format parameters
     scan_size = film.size().numpy()
@@ -109,20 +113,20 @@ def main(args):
     else:
         H_shape = (T, scan_size[0], scan_size[1])
 
-    TAL_dict['H_format'] = 2 if is_exhaustive else 1 # T_Lx_Ly_Sx_Sy if exhaustive, T_Sx_Sy if single of confocal
-    TAL_dict['sensor_grid_format'] = 2 # X_Y_3 (3D points)
-    TAL_dict['laser_grid_format'] = 2
+    tal_dict['H_format'] = 2 if is_exhaustive else 1 # T_Lx_Ly_Sx_Sy if exhaustive, T_Sx_Sy if single of confocal
+    tal_dict['sensor_grid_format'] = 2 # X_Y_3 (3D points)
+    tal_dict['laser_grid_format'] = 2
 
     # Sensor and laser positions and point grids
     sensor_grid_xyz, sensor_grid_normals, laser_grid_xyz, laser_grid_normals = (
         get_sensor_laser_intersections(scene, scan_size, laser_scan_size, force_equal_scan, is_single))
 
-    TAL_dict['sensor_xyz'] = sensor.m_to_world.translation().numpy().flatten()
-    TAL_dict['sensor_grid_xyz'] = sensor_grid_xyz
-    TAL_dict['sensor_grid_normals'] = sensor_grid_normals
-    TAL_dict['laser_xyz'] = mi.traverse(emitter)['to_world'].translation().numpy().flatten()
-    TAL_dict['laser_grid_xyz'] = laser_grid_xyz
-    TAL_dict['laser_grid_normals'] = laser_grid_normals
+    tal_dict['sensor_xyz'] = sensor.m_to_world.translation().numpy().flatten()
+    tal_dict['sensor_grid_xyz'] = sensor_grid_xyz
+    tal_dict['sensor_grid_normals'] = sensor_grid_normals
+    tal_dict['laser_xyz'] = mi.traverse(emitter)['to_world'].translation().numpy().flatten()
+    tal_dict['laser_grid_xyz'] = laser_grid_xyz
+    tal_dict['laser_grid_normals'] = laser_grid_normals
 
     # Render the NLOS scene
     transient_data = np.zeros(H_shape)
@@ -133,7 +137,7 @@ def main(args):
         transient_data = np.array(transient_data)
         print(f"Rendering done, took {time.time() - start:.3f} seconds")
 
-        # Reshape to match TAL's H format
+        # Reshape to match tal's H format
         transient_data = np.moveaxis(transient_data, -2, 0) # Time dimension should be first
         if not is_polarized:
             # If simulated than one channel (RGB), sum them, except for polarized variants
@@ -143,17 +147,17 @@ def main(args):
             # Swap sensor scan and laser illumination dimensions
             transient_data = transient_data.swapaxes(1, 3).swapaxes(2, 4)
 
-    TAL_dict['H'] = transient_data
+    tal_dict['H'] = transient_data
 
-    # Write TAL compatible data to a HDF5 file
+    # Write tal compatible data to a HDF5 file
     out_file = h5py.File(args.output_file, 'w')
-    for key, value in TAL_dict.items():
+    for key, value in tal_dict.items():
         out_file[key] = value
     out_file.close()
-    print(f"Saved TAL compatible HDF5 file to {args.output_file}")
+    print(f"Saved tal compatible HDF5 file to {args.output_file}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="mitransient-TAL-converter")
+    parser = argparse.ArgumentParser(description="mitransient-tal-converter")
     parser.add_argument("scene_file", type=str,
                         help="XML file describing the scene to be rendered with mitransient")
     parser.add_argument("-v", "--variant", type=str, default="llvm_mono",
