@@ -5,7 +5,7 @@ import numpy as np
 import h5py
 
 
-def get_sensor_laser_intersections(scene, scan_size, laser_scan_size, force_equal_grids):
+def get_sensor_laser_intersections(scene, scan_size, laser_scan_size, force_equal_grids, is_single_capture):
     import mitsuba as mi
     import drjit as dr
 
@@ -24,10 +24,16 @@ def get_sensor_laser_intersections(scene, scan_size, laser_scan_size, force_equa
     si_sensor = scene.ray_intersect(sensor_rays, ray_flags=mi.RayFlags.All, coherent=mi.Bool(True))
 
     si_laser = None
-    if force_equal_grids:
-        # If scanning is equal, scanned and illuminated points are the same
-        si_laser = si_sensor
-    else:
+    if is_single_capture:
+        trafo = emitter.world_transform()
+        laser_dir: mi.Vector3f = trafo @ mi.Vector3f(0, 0, 1)
+
+        laser_ray = mi.Ray3f(mi.Point3f(trafo.translation()), laser_dir)
+        si_laser = scene.ray_intersect(laser_ray)
+
+        assert dr.all(si_laser.is_valid()), \
+            'The emitter is not pointing at the scene!'
+    elif not force_equal_grids:
         # Else, sample rays from the emitter to obtain illuminated points
         # Dummy emitter, with custom FOV
         dummy_emitter = mi.load_dict({
@@ -42,10 +48,13 @@ def get_sensor_laser_intersections(scene, scan_size, laser_scan_size, force_equa
             dr.linspace(mi.Float, 0.0, 1.0, laser_scan_size[1], endpoint=False),
         )
         points: mi.Point2f = mi.Point2f(laser_x, laser_y)
-        laser_rays, _ = dummy_emitter. sample_ray(mi.Float(0.0), mi.Float(0.0), mi.Point2f(0.0), points, mi.Bool(True))
+        laser_rays, _ = dummy_emitter.sample_ray(mi.Float(0.0), mi.Float(0.0), mi.Point2f(0.0), points, mi.Bool(True))
 
         # Intersect with the scene to obtain the illuminated points
         si_laser = scene.ray_intersect(laser_rays, ray_flags=mi.RayFlags.All, coherent=mi.Bool(True))
+    else:
+        # If scanning is equal, scanned and illuminated points are the same
+        si_laser = si_sensor
 
     # Transform point positions and normals to TAL compatible format
     sensor_grid_xyz = dr.reshape(mi.TensorXf, si_sensor.p, (scan_size[0], scan_size[1], 3)).numpy()
@@ -85,8 +94,13 @@ def main(args):
 
     # Data format parameters
     scan_size = film.size().numpy()
-    laser_scan_size = scan_size
-    if not integrator.force_equal_grids:
+    force_equal_scan = integrator.force_equal_grids
+    is_single = integrator.capture_type == 1
+    if is_single:
+        laser_scan_size = (1, 1)
+    elif force_equal_scan:
+        laser_scan_size = scan_size
+    else:
         laser_scan_size = (film.laser_scan_width if film.laser_scan_width > 1 else 1,
                            film.laser_scan_height if film.laser_scan_height > 1 else 1)
     is_exhaustive = integrator.capture_type == 3
@@ -101,7 +115,7 @@ def main(args):
 
     # Sensor and laser positions and point grids
     sensor_grid_xyz, sensor_grid_normals, laser_grid_xyz, laser_grid_normals = (
-        get_sensor_laser_intersections(scene, scan_size, laser_scan_size, integrator.force_equal_grids))
+        get_sensor_laser_intersections(scene, scan_size, laser_scan_size, force_equal_scan, is_single))
 
     TAL_dict['sensor_xyz'] = sensor.m_to_world.translation().numpy().flatten()
     TAL_dict['sensor_grid_xyz'] = sensor_grid_xyz
@@ -115,9 +129,9 @@ def main(args):
     if not args.dryrun:
         dr.print("Rendering the NLOS scene...")
         start = time.time()
-        _, transient_data = mi.render(scene, spp=100)
+        _, transient_data = mi.render(scene)
         transient_data = np.array(transient_data)
-        dr.print(f"Rendering done, took {time.time() - start:.3f} seconds")
+        print(f"Rendering done, took {time.time() - start:.3f} seconds")
 
         # Reshape to match TAL's H format
         transient_data = np.moveaxis(transient_data, -2, 0) # Time dimension should be first
@@ -133,8 +147,10 @@ def main(args):
 
     # Write TAL compatible data to a HDF5 file
     out_file = h5py.File(args.output_file, 'w')
-    # TODO: full hdf5 file
+    for key, value in TAL_dict.items():
+        out_file[key] = value
     out_file.close()
+    print(f"Saved TAL compatible HDF5 file to {args.output_file}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="mitransient-TAL-converter")
