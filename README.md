@@ -28,3 +28,5 @@ Also note that if you use ```rbg``` or ```spectral``` Mitsuba variants for rende
 be summed into a single one, as required for tal. When using ```polarized``` variants, the complete Stokes vector will
 be saved, however tal does not provide any reconstruction algorithm that leverages polarization, and will only use 
 the intensity component.
+
+You can find a few examples of usage in ```reconstruction_examples.ipynb```.

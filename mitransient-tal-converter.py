@@ -97,7 +97,7 @@ def main(args):
     T = film.temporal_bins
     tal_dict['t_start'] = film.start_opl
     tal_dict['delta_t'] = film.bin_width_opl
-    tal_dict['t_account_first_and_last_bounces'] = integrator.account_first_and_last_bounces
+    tal_dict['t_accounts_first_and_last_bounces'] = integrator.account_first_and_last_bounces
 
     # Data format parameters
     scan_size = film.size().numpy()
@@ -170,8 +170,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="mitransient-tal-converter")
     parser.add_argument("scene_file", type=str,
                         help="XML file describing the scene to be rendered with mitransient")
-    parser.add_argument("-v", "--variant", type=str, default="llvm_mono",
-                        help="Mitsuba variant used for rendering (default = llvm_mono)")
+    parser.add_argument("-v", "--variant", type=str, default="llvm_ad_mono",
+                        help="Mitsuba variant used for rendering (default = llvm_ad_mono)")
     parser.add_argument("-d", "--dryrun", action="store_true",
                         help="If set, the script does not render the scene, but fills the rest of the HDF5 file")
     parser.add_argument("-o", "--output_file", type=str, default="./output.hdf5",
